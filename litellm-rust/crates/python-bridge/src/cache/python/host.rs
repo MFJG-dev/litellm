@@ -53,7 +53,25 @@ impl PythonCache {
             .bind(py)
             .copy()?;
         match call {
-            CacheCall::Lookup { reply } => {
+            CacheCall::BuildKey { reply } => {
+                let result = match arguments.get_item("cache_key")? {
+                    Some(key) => Ok(key),
+                    None => cache
+                        .bind(py)
+                        .call_method("get_cache_key", (), Some(&arguments)),
+                }
+                .map(Bound::unbind);
+                HostStep::from_python(py, false, result, move |py, result| {
+                    reply.send(result.map_err(|_| Error::Unavailable).and_then(|value| {
+                        value
+                            .extract::<Option<String>>(py)
+                            .map_err(|_| Error::InvalidEntry)
+                    }));
+                    Ok(HostStep::Ready)
+                })
+            }
+            CacheCall::Lookup { key, reply } => {
+                arguments.set_item("cache_key", key)?;
                 let method = if self.asynchronous {
                     "async_get_cache"
                 } else {
@@ -76,7 +94,8 @@ impl PythonCache {
                     Ok(HostStep::Ready)
                 })
             }
-            CacheCall::Store { value, reply } => {
+            CacheCall::Store { key, value, reply } => {
+                arguments.set_item("cache_key", key)?;
                 let method = if self.asynchronous {
                     "async_add_cache"
                 } else {

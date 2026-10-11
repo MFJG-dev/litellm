@@ -2,7 +2,8 @@ use std::{future::Future, pin::Pin, time::Duration};
 
 use litellm_cache::Error;
 use litellm_cache_response::{
-    ResponseCacheConfig, ResponseCacheRequest, ResponseCacheService, ResponseEnvelope,
+    CacheKeyBuilder, CacheKeyInput, ResponseCacheConfig, ResponseCacheRequest,
+    ResponseCacheService, ResponseEnvelope, cache_key,
 };
 use litellm_host::{
     machine::{HostServices, MachineFault},
@@ -37,10 +38,15 @@ fn to_python(value: Value) -> Result<Value, Error> {
 }
 
 pub(crate) enum CacheCall {
+    BuildKey {
+        reply: Reply<Result<Option<String>, Error>>,
+    },
     Lookup {
+        key: String,
         reply: Reply<Result<Option<Value>, Error>>,
     },
     Store {
+        key: String,
         value: Value,
         reply: Reply<Result<(), Error>>,
     },
@@ -67,6 +73,23 @@ where
     })
 }
 
+impl<P: Protocol<HostCall = CacheCall>> CacheKeyBuilder for PythonCacheService<P>
+where
+    P::Error: From<MachineFault>,
+{
+    fn build_key<'a>(
+        &'a self,
+        _: &'a CacheKeyInput,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, Error>> + Send + 'a>> {
+        Box::pin(async move {
+            self.services
+                .call(|reply| CacheCall::BuildKey { reply })
+                .await
+                .map_err(|_| Error::Unavailable)?
+        })
+    }
+}
+
 impl<P: Protocol<HostCall = CacheCall>> ResponseCacheService for PythonCacheService<P>
 where
     P::Error: From<MachineFault>,
@@ -77,12 +100,15 @@ where
 
     fn lookup<'a>(
         &'a self,
-        _: &'a ResponseCacheRequest,
+        request: &'a ResponseCacheRequest,
         _: Duration,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Value>, Error>> + Send + 'a>> {
         Box::pin(async move {
             self.services
-                .call(|reply| CacheCall::Lookup { reply })
+                .call(|reply| CacheCall::Lookup {
+                    key: cache_key(&request.key),
+                    reply,
+                })
                 .await
                 .map_err(|_| Error::Unavailable)??
                 .map(from_python)
@@ -92,14 +118,18 @@ where
 
     fn store<'a>(
         &'a self,
-        _: &'a ResponseCacheRequest,
+        request: &'a ResponseCacheRequest,
         value: Value,
         _: Duration,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
         Box::pin(async move {
             let value = to_python(value)?;
             self.services
-                .call(|reply| CacheCall::Store { value, reply })
+                .call(|reply| CacheCall::Store {
+                    key: cache_key(&request.key),
+                    value,
+                    reply,
+                })
                 .await
                 .map_err(|_| Error::Unavailable)?
         })
